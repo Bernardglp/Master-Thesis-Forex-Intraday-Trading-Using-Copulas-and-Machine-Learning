@@ -1,0 +1,1870 @@
+# Loading Packages
+
+library(Rlab)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(gridExtra)
+library(ggpubr)
+library(gganimate)
+library(ggridges)
+library(tidyverse)
+library(transformr)
+library(RColorBrewer)
+library(readxl)
+library(lattice)
+library(astsa)
+library(tseries)
+library(aTSA)
+library(lmtest)
+library(urca)
+library(vars)
+library(rmgarch)
+library(forecast)
+library(TTR)
+library(MASS)
+library(zoo)
+library(gofCopula)
+library(psych)
+library(VineCopula)
+library(copula)
+library(randomForest)
+library(naniar)
+library(nnet)
+library(triplot)
+library(xgboost)
+library(DALEX)
+
+############################### Importing Datasets between Jan 2024 and March 2024
+
+eur_usd <- read_excel("C:\\Users\\berna\\OneDrive\\Documentos\\DS_Master\\Articles Forex\\Data\\Eur_Usd_202401_202404.xlsx")
+
+eur_jpy <- read_excel("C:\\Users\\berna\\OneDrive\\Documentos\\DS_Master\\Articles Forex\\Data\\Eur_Jpy_202401_202404.xlsx")
+
+
+# Adjusting the number of observation
+
+aux_usd <- unique(eur_usd$Datetime)
+
+aux_jpy <- unique(eur_jpy$Datetime)
+
+x_obsjpy <- which(aux_jpy %in% aux_usd) 
+x_obsusd <- which(aux_usd %in% aux_jpy) 
+
+eur_usd_2 <- eur_usd[x_obsusd,]
+eur_jpy_2 <- eur_jpy[x_obsjpy,]
+
+# Defining final dataset
+
+#Considering only the JPY close price
+
+df_j <- cbind(eur_usd_2, eur_jpy_2$Close)
+colnames(df_j)[6] <- c("JPY_Close")
+head(df_j)
+
+# Calculating Lag variables and returns 
+
+df_j2 <- df_j %>%
+  mutate(Close_1 = lag(Close,1),
+         Jpy_1 = lag(JPY_Close,1) 
+  ) %>%
+  mutate(R_USD = (Close / Close_1 -1) ,
+         R_JPY = (JPY_Close / Jpy_1 -1)
+  )
+
+
+# Creating Difference between Max and Min
+
+df_j_aux <- df_j2 %>%
+  mutate(Max_Min_diff = High - Low)
+
+# Creating the 20 moving standard deviation
+
+nr <- nrow(df_j)
+sd20 <- c(rep(0,19))
+
+for( i in 20:nr)
+{ 
+  sd20[i] <- median(df_j_aux$Max_Min_diff[(i-19):i])
+  
+}
+
+df_j_aux$SD20 <- sd20
+median(sd20)
+
+# Setting 4x the risk against 2x
+
+#4*p + 2*(1-p) = 0 -> 4p + 2p - 2 = 0 -> 6p = 2 -> p = 2/6
+
+
+#Minimum probability to reach a profitable model
+
+min(4,2) / sum(4,2)
+
+#Setting the parameters (Potential discussion)
+
+good_R <- 4
+bad_R <- 2
+df_j_aux <- df_j_aux %>%
+  mutate(aux_tg_buy = Close + good_R*SD20,
+         aux_buy_stop = Close - bad_R*SD20,
+         
+         aux_tg_sell = Close - good_R*SD20,
+         aux_sell_stop = Close + bad_R*SD20
+  )
+
+
+
+#### Generating Target
+
+aux_tg <- c()
+n200<- nrow(df_j_aux)-200
+
+for( i in 1:n200)
+  
+{
+  #i = 13150
+  sim_close <- df_j_aux$Close[i] 
+  sim_SD20 <- df_j_aux$SD20[i]
+  sim_tg_buy <- sim_close + good_R*sim_SD20
+  sim_tg_sell <- sim_close - good_R*sim_SD20 
+  sim_stop_buy <- sim_close - bad_R*sim_SD20
+  sim_stop_sell <- sim_close + bad_R*sim_SD20 
+  
+  vec_aux_max <- df_j_aux$High[(i+1):(i+200)]
+  vec_aux_min <- df_j_aux$Low[(i+1):(i+200)]
+  
+  sim_min_speed_buy <- min(which(sim_tg_buy <= vec_aux_max))
+  
+  sim_min_speed_sell <- min(which(sim_tg_sell >= vec_aux_min))
+  
+  #Verifying which occurred firstly
+  aux_2 <- ifelse(sim_min_speed_buy == Inf & sim_min_speed_sell == Inf, 0,
+                  ifelse(sim_min_speed_buy < sim_min_speed_sell,1,-1))
+  
+  # Generating the Speed of each Stoploss
+  
+  sim_min_speed_buy_STOP <- min(which(sim_stop_buy >= vec_aux_min))
+  
+  sim_min_speed_sell_STOP <- min(which(sim_stop_sell <= vec_aux_max))
+  
+  aux_tg[i]  <-   ifelse(aux_2 == 1 & sim_min_speed_buy < sim_min_speed_buy_STOP, "Buy Correct",
+                         ifelse(aux_2 == 1 & sim_min_speed_buy >= sim_min_speed_buy_STOP, "Buy Incorrect",
+                                ifelse(aux_2 == -1 & sim_min_speed_sell < sim_min_speed_sell_STOP, "Sell Correct",
+                                       ifelse(aux_2 == -1 & sim_min_speed_sell >= sim_min_speed_sell_STOP, "Sell Incorrect","No conclusion"
+                                       ))))
+  
+}
+
+df_j_aux2 <-  df_j_aux[1:n200,]
+df_j_aux2$AUX_TG <- aux_tg
+
+
+# Calculating Rolling Kendall Rank Coefficient
+
+rolling_kendall <- c(rep(0.15,20))
+
+for(i in 21:n200)
+{ 
+  k <- cor(df_j_aux$R_USD[(i-19):i],df_j_aux$R_JPY[(i-19):i],method = "kendall")
+  rolling_kendall[i] <- k
+}
+
+a <- 1
+while(a > 0)
+{
+  
+  rkmis <- which_na(rolling_kendall)
+  a <-length(rkmis)
+  if(length(rkmis) >= 1){ rolling_kendall[rkmis] <- rolling_kendall[rkmis-1]}
+}
+
+df_j_aux2$Rolling_Kendall <- rolling_kendall
+
+
+######## EMA's, RSI, Lower Low, Higher High and Price Variation
+
+#Calculating Exponential Moving Average and RSI
+
+
+df_j_aux2 <- df_j_aux2 %>%
+  mutate(EMA_20 = EMA(Close,n=20,wilder = TRUE),
+         EMA_200 = EMA(Close,n=200),
+         RSI_14 = RSI(Close,n=14)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    CANDLE_BODY = abs(Close - Open),
+    LOWER_SHADOW = min(Close,Open) - Low,
+    UPPER_SHADOW = High - max(Close,Open),
+  ) %>%
+  
+  dplyr::ungroup() %>%
+  mutate(HIGHER_MAX = ifelse(High > dplyr::lag(High,1),1,0),
+         LOWER_MIN = ifelse(Low < dplyr::lag(Low,1),1,0),
+         PRICE_VARIATION_12 = Close / dplyr::lag(Close,12),
+         PRICE_VARIATION_24 = Close / dplyr::lag(Close,24),
+         PRICE_VARIATION_36 = Close / dplyr::lag(Close,36)
+  ) %>%
+  mutate(HIGHER_MAX_12 = EMA(HIGHER_MAX,n=12,wilder = TRUE),
+         LOWER_MIN_12 = EMA(LOWER_MIN,n=12,wilder = TRUE)
+  )
+
+#Calculating the difference between the OLHC prices against the averages
+
+df_j_aux2$DIF_CLOSE_EMA20 = df_j_aux2$Close - df_j_aux2$EMA_20 
+df_j_aux2$DIF_LOW_EMA20 = df_j_aux2$Low - df_j_aux2$EMA_20 
+df_j_aux2$DIF_HIGH_EMA20 = df_j_aux2$High - df_j_aux2$EMA_20 
+df_j_aux2$DIF_CLOSE_EMA200 = df_j_aux2$Close - df_j_aux2$EMA_200 
+
+#Calculating dummy variables to identify if the averages are greater or lower than the OLCH prices
+
+df_j_aux3 <- df_j_aux2 %>%
+  mutate(TIME_DIF_CLOSE_EMA20 = ifelse(DIF_CLOSE_EMA20 > 0 ,1,-1),
+         TIME_DIF_LOW_EMA20 = ifelse(DIF_LOW_EMA20 > 0 ,1,-1),
+         TIME_DIF_HIGH_EMA20 = ifelse(DIF_HIGH_EMA20 > 0 ,1,-1),
+         TIME_DIF_CLOSE_EMA200 = ifelse(DIF_CLOSE_EMA200 > 0 ,1,-1)
+  ) 
+
+aux_time1 <- c(0)
+aux_time2 <- c(0)
+aux_time3 <- c(0)
+
+#Calculating sequences of consecutive points greater or lower than the averages
+
+for(i in 2:n200)
+{
+  aux_time1[i] <- ifelse(df_j_aux3$TIME_DIF_CLOSE_EMA20[i] * df_j_aux3$TIME_DIF_CLOSE_EMA20[i-1] == 1,
+                         df_j_aux3$TIME_DIF_CLOSE_EMA20[i] + aux_time1[i-1],0)
+  
+  aux_time2[i] <- ifelse(df_j_aux3$TIME_DIF_LOW_EMA20[i] * df_j_aux3$TIME_DIF_LOW_EMA20[i-1] == 1,
+                         df_j_aux3$TIME_DIF_LOW_EMA20[i] + aux_time2[i-1],0)
+  
+  aux_time3[i] <- ifelse(df_j_aux3$TIME_DIF_HIGH_EMA20[i] * df_j_aux3$TIME_DIF_HIGH_EMA20[i-1] == 1,
+                         df_j_aux3$TIME_DIF_HIGH_EMA20[i] + aux_time3[i-1],0)
+  
+}
+
+df_j_aux3$COUNT_SEQ_CLOSE_EMA20 <- aux_time1
+
+df_j_aux3$COUNT_SEQ_LOW_EMA20 <- aux_time2
+
+df_j_aux3$COUNT_SEQ_HIGH_EMA20 <- aux_time3
+
+# MACD
+
+MACD_Feature <- MACD(df_j_aux3$Close,nFast = 24, nSlow = 39, nSig = 12,percent = TRUE)
+
+df_j_aux3$MACD <- MACD_Feature[,1] * 100
+df_j_aux3$MACD_Signal <- MACD_Feature[,2] * 100
+df_j_aux3$MACD_Product <- df_j_aux3$MACD - df_j_aux3$MACD_Signal
+
+
+#### Removing Missing Values
+
+aux_missing <- which_na(df_j_aux3$EMA_200)
+
+df_j_aux3 <- df_j_aux3[-aux_missing,]
+
+which_na(df_j_aux3)
+
+df_train0 <- df_j_aux3 
+
+############################### Importing Datasets between Apr 2024 and May 2024
+
+eur_usd <- read_excel("C:\\Users\\berna\\OneDrive\\Documentos\\DS_Master\\Articles Forex\\Data\\Eur_Usd_202404_202405.xlsx")
+
+eur_jpy <- read_excel("C:\\Users\\berna\\OneDrive\\Documentos\\DS_Master\\Articles Forex\\Data\\Eur_Jpy_202404_202405.xlsx")
+
+# Adjusting the number of observation
+
+aux_usd <- unique(eur_usd$Datetime)
+
+aux_jpy <- unique(eur_jpy$Datetime)
+
+x_obsjpy <- which(aux_jpy %in% aux_usd) 
+x_obsusd <- which(aux_usd %in% aux_jpy) 
+
+eur_usd_2 <- eur_usd[x_obsusd,]
+eur_jpy_2 <- eur_jpy[x_obsjpy,]
+
+# Defining final dataset
+
+#Considering only the JPY close price
+
+df_j <- cbind(eur_usd_2[1:5], eur_jpy_2$Close)
+colnames(df_j)[6] <- c("JPY_Close")
+head(df_j)
+
+# Calculating Lag variables and returns 
+
+df_j2 <- df_j %>%
+  mutate(Close_1 = lag(Close,1),
+         Jpy_1 = lag(JPY_Close,1) 
+  ) %>%
+  mutate(R_USD = (Close / Close_1 -1) ,
+         R_JPY = (JPY_Close / Jpy_1 -1)
+  )
+
+
+# Creating Difference between Max and Min
+
+df_j_aux <- df_j2 %>%
+  mutate(Max_Min_diff = High - Low)
+
+# Creating the 20 moving standard deviation
+
+nr <- nrow(df_j)
+sd20 <- c(rep(0,19))
+
+for( i in 20:nr)
+{ 
+  sd20[i] <- median(df_j_aux$Max_Min_diff[(i-19):i])
+  
+}
+
+df_j_aux$SD20 <- sd20
+median(sd20)
+
+# Setting 4x the risk against 2x
+
+#4*p + 2*(1-p) = 0 -> 4p + 2p - 2 = 0 -> 6p = 2 -> p = 2/6
+
+
+#Minimum probability to reach a profitable model
+
+min(4,2) / sum(4,2)
+
+#Setting the parameters (Potential discussion)
+
+good_R <- 4
+bad_R <- 2
+df_j_aux <- df_j_aux %>%
+  mutate(aux_tg_buy = Close + good_R*SD20,
+         aux_buy_stop = Close - bad_R*SD20,
+         
+         aux_tg_sell = Close - good_R*SD20,
+         aux_sell_stop = Close + bad_R*SD20
+  )
+
+
+
+
+#### Generating Target
+
+aux_tg <- c()
+n200<- nrow(df_j_aux)-200
+
+for( i in 1:n200)
+  
+{
+  #i = 13150
+  sim_close <- df_j_aux$Close[i] 
+  sim_SD20 <- df_j_aux$SD20[i]
+  sim_tg_buy <- sim_close + good_R*sim_SD20
+  sim_tg_sell <- sim_close - good_R*sim_SD20 
+  sim_stop_buy <- sim_close - bad_R*sim_SD20
+  sim_stop_sell <- sim_close + bad_R*sim_SD20 
+  
+  vec_aux_max <- df_j_aux$High[(i+1):(i+200)]
+  vec_aux_min <- df_j_aux$Low[(i+1):(i+200)]
+  
+  sim_min_speed_buy <- min(which(sim_tg_buy <= vec_aux_max))
+  
+  sim_min_speed_sell <- min(which(sim_tg_sell >= vec_aux_min))
+  
+  #Verifying which occurred firstly
+  aux_2 <- ifelse(sim_min_speed_buy == Inf & sim_min_speed_sell == Inf, 0,
+                  ifelse(sim_min_speed_buy < sim_min_speed_sell,1,-1))
+  
+  # Generating the Speed of each Stoploss
+  
+  sim_min_speed_buy_STOP <- min(which(sim_stop_buy >= vec_aux_min))
+  
+  sim_min_speed_sell_STOP <- min(which(sim_stop_sell <= vec_aux_max))
+  
+  aux_tg[i]  <-   ifelse(aux_2 == 1 & sim_min_speed_buy < sim_min_speed_buy_STOP, "Buy Correct",
+                         ifelse(aux_2 == 1 & sim_min_speed_buy >= sim_min_speed_buy_STOP, "Buy Incorrect",
+                                ifelse(aux_2 == -1 & sim_min_speed_sell < sim_min_speed_sell_STOP, "Sell Correct",
+                                       ifelse(aux_2 == -1 & sim_min_speed_sell >= sim_min_speed_sell_STOP, "Sell Incorrect","No conclusion"
+                                       ))))
+  
+}
+
+df_j_aux2 <-  df_j_aux[1:n200,]
+df_j_aux2$AUX_TG <- aux_tg
+
+
+# Calculating Rolling Kendall Rank Coefficient
+
+rolling_kendall <- c(rep(0.15,20))
+
+for(i in 21:n200)
+{ 
+  k <- cor(df_j_aux$R_USD[(i-19):i],df_j_aux$R_JPY[(i-19):i],method = "kendall")
+  rolling_kendall[i] <- k
+}
+
+a <- 1
+while(a > 0)
+{
+  
+  rkmis <- which_na(rolling_kendall)
+  a <-length(rkmis)
+  if(length(rkmis) >= 1){ rolling_kendall[rkmis] <- rolling_kendall[rkmis-1]}
+}
+
+df_j_aux2$Rolling_Kendall <- rolling_kendall
+
+
+######## EMA's, RSI, Lower Low, Higher High and Price Variation
+
+#Calculating Exponential Moving Average and RSI
+
+
+df_j_aux2 <- df_j_aux2 %>%
+  mutate(EMA_20 = EMA(Close,n=20,wilder = TRUE),
+         EMA_200 = EMA(Close,n=200),
+         RSI_14 = RSI(Close,n=14)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    CANDLE_BODY = abs(Close - Open),
+    LOWER_SHADOW = min(Close,Open) - Low,
+    UPPER_SHADOW = High - max(Close,Open),
+  ) %>%
+  
+  dplyr::ungroup() %>%
+  mutate(HIGHER_MAX = ifelse(High > dplyr::lag(High,1),1,0),
+         LOWER_MIN = ifelse(Low < dplyr::lag(Low,1),1,0),
+         PRICE_VARIATION_12 = Close / dplyr::lag(Close,12),
+         PRICE_VARIATION_24 = Close / dplyr::lag(Close,24),
+         PRICE_VARIATION_36 = Close / dplyr::lag(Close,36)
+  ) %>%
+  mutate(HIGHER_MAX_12 = EMA(HIGHER_MAX,n=12,wilder = TRUE),
+         LOWER_MIN_12 = EMA(LOWER_MIN,n=12,wilder = TRUE)
+  )
+
+#Calculating the difference between the OLHC prices against the averages
+
+df_j_aux2$DIF_CLOSE_EMA20 = df_j_aux2$Close - df_j_aux2$EMA_20 
+df_j_aux2$DIF_LOW_EMA20 = df_j_aux2$Low - df_j_aux2$EMA_20 
+df_j_aux2$DIF_HIGH_EMA20 = df_j_aux2$High - df_j_aux2$EMA_20 
+df_j_aux2$DIF_CLOSE_EMA200 = df_j_aux2$Close - df_j_aux2$EMA_200 
+
+#Calculating dummy variables to identify if the averages are greater or lower than the OLCH prices
+
+df_j_aux3 <- df_j_aux2 %>%
+  mutate(TIME_DIF_CLOSE_EMA20 = ifelse(DIF_CLOSE_EMA20 > 0 ,1,-1),
+         TIME_DIF_LOW_EMA20 = ifelse(DIF_LOW_EMA20 > 0 ,1,-1),
+         TIME_DIF_HIGH_EMA20 = ifelse(DIF_HIGH_EMA20 > 0 ,1,-1),
+         TIME_DIF_CLOSE_EMA200 = ifelse(DIF_CLOSE_EMA200 > 0 ,1,-1)
+  ) 
+
+aux_time1 <- c(0)
+aux_time2 <- c(0)
+aux_time3 <- c(0)
+
+#Calculating sequences of consecutive points greater or lower than the averages
+
+for(i in 2:n200)
+{
+  aux_time1[i] <- ifelse(df_j_aux3$TIME_DIF_CLOSE_EMA20[i] * df_j_aux3$TIME_DIF_CLOSE_EMA20[i-1] == 1,
+                         df_j_aux3$TIME_DIF_CLOSE_EMA20[i] + aux_time1[i-1],0)
+  
+  aux_time2[i] <- ifelse(df_j_aux3$TIME_DIF_LOW_EMA20[i] * df_j_aux3$TIME_DIF_LOW_EMA20[i-1] == 1,
+                         df_j_aux3$TIME_DIF_LOW_EMA20[i] + aux_time2[i-1],0)
+  
+  aux_time3[i] <- ifelse(df_j_aux3$TIME_DIF_HIGH_EMA20[i] * df_j_aux3$TIME_DIF_HIGH_EMA20[i-1] == 1,
+                         df_j_aux3$TIME_DIF_HIGH_EMA20[i] + aux_time3[i-1],0)
+  
+}
+
+df_j_aux3$COUNT_SEQ_CLOSE_EMA20 <- aux_time1
+
+df_j_aux3$COUNT_SEQ_LOW_EMA20 <- aux_time2
+
+df_j_aux3$COUNT_SEQ_HIGH_EMA20 <- aux_time3
+
+# MACD
+
+MACD_Feature <- MACD(df_j_aux3$Close,nFast = 23, nSlow = 39, nSig = 13,percent = TRUE)
+
+df_j_aux3$MACD <- MACD_Feature[,1] * 100
+df_j_aux3$MACD_Signal <- MACD_Feature[,2] * 100
+df_j_aux3$MACD_Product <- df_j_aux3$MACD - df_j_aux3$MACD_Signal
+
+
+#### Removing Missing Values
+
+aux_missing <- which_na(df_j_aux3$EMA_200)
+
+df_j_aux3 <- df_j_aux3[-aux_missing,]
+
+which_na(df_j_aux3)
+
+df_train1 <- df_j_aux3 
+
+### Stacking all training period ( Jan 2024 to May 2024)
+
+df_train2 <- rbind(df_train0,df_train1) %>%
+            mutate(TARGET = as.factor(
+                  ifelse(AUX_TG %in% c('Sell Incorrect','Buy Incorrect','No conclusion'),"No Trading",AUX_TG)
+))
+
+###################################Times Series Approach####################
+
+# Raw Plot of the curves
+
+usdplt1 <- xyplot(Close~ Datetime,
+                  data = df_train2, type = "l")
+jpyplt1<- xyplot(JPY_Close~ Datetime,
+                 data = df_train2, type = "l")
+
+combplt1 <- latticeExtra::doubleYScale(usdplt1,jpyplt1,style1 = 1, style2 = 4, 
+                                       add.ylab2 = TRUE)
+combplt1 <- update(combplt1,main = "Eur/Usd and Eur/Jpy over 2014")
+combplt1
+
+#Pearson Correlation
+cor.test(df_train2$Close, df_train2$JPY_Close, alternative = "two.sided",
+         method = c("pearson"))
+
+# Spearman Correlation
+cor(df_train2$Close, df_train2$JPY_Close, method = c("spearman"))
+
+
+#Creating ts objects
+
+usd_ts <- ts(df_train2$Close, start = df_train2$Datetime[1], frequency = 288)
+jpy_ts <- ts(df_train2$JPY_Close, start = df_train2$Datetime[1], frequency = 288)
+
+# Lag Correlation Plot
+astsa::lag2.plot (usd_ts,jpy_ts, 8)
+
+# Autocorrelation
+
+par(mfrow = c(2, 2))
+acf(usd_ts)
+acf(diff(usd_ts))
+
+acf(jpy_ts)
+acf(diff(jpy_ts))
+
+par(mfrow = c(1, 1))
+
+
+# Testing Stationarity ADF Test
+tseries::adf.test(usd_ts)
+tseries::adf.test(jpy_ts)
+
+
+# Differentiating the data to remove the address Non-Stationary
+
+
+#Checking the Correlation considering the returns
+
+cor.test(df_train2$R_USD, df_train2$R_JPY, alternative = "two.sided",
+         method = c("spearman"))
+
+cor(df_train2$R_USD, df_train2$R_JPY, method = "spearman")
+
+# Creating ts obejects for the return
+
+usd_R_ts <- ts(df_train2$R_USD, start = df_train2$Datetime[1], frequency = 288)
+jpy_R_ts <- ts(df_train2$R_JPY, start = df_train2$Datetime[1], frequency = 288)
+
+# Testing Stationarity Philipps Perron 
+library(tseries)
+pp.test(usd_ts)
+pp.test(jpy_ts)
+
+pp.test(jpy_R_ts)
+pp.test(usd_R_ts)
+
+
+# Perform Granger causality test
+as<- nrow(df_train2) / 3
+
+a1 <- seq(1,as,1)
+a2 <- seq(as,as*2,1)
+a3 <- seq(as*2,as*3,1)
+
+a <- a1
+
+granger_test_result1 <- grangertest(usd_R_ts[a], jpy_R_ts[a], order = 3)
+granger_test_result1
+
+granger_test_result2 <- grangertest(jpy_R_ts[a],usd_R_ts[a], order = 3)
+granger_test_result2
+
+#usd
+mean(c(0.6989,0.1166,3.409e-06))
+
+#Jpy
+mean(c(0.02554,0.0004646,0.07482))
+
+
+######################################Technical Indicators##################################
+
+# MACD Optmization
+
+TT <- table(df_train2$AUX_TG)
+
+#Baseline Buy
+TT[1] / sum(TT)
+
+#Baseline Sell
+TT[4] / sum(TT)
+
+df_j_aux3 <- df_train2
+nFast <- c() 
+nSlow <- c()
+nSig <- c()
+aux_result <- c()
+aux_result2 <- c()
+k<- 0
+
+for(i in 5:25)
+{ 
+  for(j in i:40) 
+  { 
+    for(z in 8:20)
+    { k <- k+1
+    
+    MACD_Feature <- MACD(df_j_aux3$Close,nFast = i, nSlow = j, nSig = z,percent = TRUE)
+    
+    df_j_aux3$MACD <- MACD_Feature[,1] * 100
+    df_j_aux3$MACD_Signal <- MACD_Feature[,2] * 100
+    
+    #MACD and signal are negative ; MACD >= 1.2 signal
+    
+    Filter_Buy <- df_j_aux3 %>%
+      filter(
+        MACD < 0 & MACD_Signal < 0 &
+          MACD > MACD_Signal*1.1 &
+          dplyr::lag(MACD,5) < dplyr::lag(MACD_Signal,5))
+    
+    aux_result[k] <- table(Filter_Buy$AUX_TG)[1] / nrow(Filter_Buy)
+    nFast[k] <- i
+    nSlow[k] <- j
+    nSig[k] <- z
+    
+    
+    Filter_Sell <- df_j_aux3 %>%
+      filter( 
+        MACD > 0 & MACD_Signal > 0 &
+          MACD < MACD_Signal*0.9 &
+          dplyr::lag(MACD,5) > dplyr::lag(MACD_Signal,5))
+    
+    aux_result2[k] <- table(Filter_Sell$AUX_TG)[4] / nrow(Filter_Sell)
+    
+    
+    }
+  }
+}
+
+MACD_OPTMIUM <- data.frame(nFast = nFast, 
+                           nSlow = nSlow,
+                           nSig = nSig,
+                           Result_Buy = aux_result,
+                           Result_Sell = aux_result2) %>%
+  mutate(Mean_result = (Result_Buy + Result_Sell) / 2,
+         Opt = (Result_Buy - 0.36131 + Result_Sell - 0.3058531) ,
+         Balance = ifelse(Result_Buy > 0.36131 & Result_Sell > 0.3058531,1,0),
+         Balance_Rate = abs((Result_Buy - 0.36131) - (Result_Sell - 0.3058531))
+  ) %>%
+  arrange(desc(Balance),desc(Mean_result),Balance_Rate)
+
+
+head(MACD_OPTMIUM %>% filter(Balance_Rate <= .025),10)
+
+MACD_DF <- data.frame(MACD = c("23-40-13","12-26-9","Baseline"),
+                      Buy_Correct = c(0.3724, 0.3757, 0.3613) ,
+                      Sell_Correct = c(0.3407, 0.2756, 0.3058)
+)
+
+
+library(forcats)
+
+gmacd1 <- ggplot(data = MACD_DF, aes(x =Buy_Correct , y =fct_reorder(MACD,Buy_Correct))) +
+  geom_col(fill = "#3863f2", width = 0.2)+
+  geom_text(aes(label = Buy_Correct), vjust = -0.5, size = 5) +
+  labs(title = "A - Buy Correct Percentage by different MACD parametrization",
+       y = "MACD") +
+  theme_classic()
+
+gmacd2 <- ggplot(data = MACD_DF, aes(x =Sell_Correct , fct_reorder(MACD,Sell_Correct))) +
+  geom_col(fill = "#3863f2", width = 0.2)+
+  geom_text(aes(label = Sell_Correct), vjust = -0.5, size = 5) +
+  labs(title = "B - Sell Correct Percentage by different MACD parametrization",
+       y = "MACD") +
+  theme_classic()
+
+grid.arrange(gmacd1,gmacd2,nrow=1)
+
+
+
+################# RSI 
+
+df_pfas <- df_train2 %>% 
+  dplyr::select(Datetime,Open,High,Low,Close,TARGET,RSI_14,aux_tg_buy,aux_buy_stop,aux_tg_sell,aux_sell_stop) %>%
+  mutate(STR_RSI = ifelse(RSI_14 < 30 & dplyr::lag(RSI_14,1) > 30 , "Buy", 
+                          ifelse(RSI_14 > 70 & dplyr::lag(RSI_14,1) < 70, "Sell","No Trading")))
+
+table(df_pfas$STR_RSI, df_pfas$TARGET)
+
+148 / (148 + 102 + 120)
+121 / (110 + 154 + 121)
+
+10334 / (10334 + 9502 + 8724)
+
+8724 / (10334 + 9502 + 8724)
+
+################# DIF_EMA200
+
+summary( (df_train2$DIF_CLOSE_EMA200)*100)
+
+df_pfas <- df_train2 %>% 
+  dplyr::select(Datetime,Open,High,Low,Close,TARGET,DIF_CLOSE_EMA200,aux_tg_buy,aux_buy_stop,aux_tg_sell,aux_sell_stop) %>%
+  mutate(DEC = ifelse(DIF_CLOSE_EMA200 > 0 & dplyr::lag(DIF_CLOSE_EMA200,5) < 0,"Buy",
+                      ifelse(DIF_CLOSE_EMA200 < 0 & dplyr::lag(DIF_CLOSE_EMA200,5) > 0,"Sell", "Other"
+                      )))
+df_pfas$DIF_RANGE <- cut(df_pfas$DIF_CLOSE_EMA200,breaks = seq(-0.01,0.01,by =0.002))
+
+TDFIEMA <- table(df_pfas$DIF_RANGE, df_pfas$TARGET)
+sum(TDFIEMA[1,])
+sum(TDFIEMA[2,])
+sum(TDFIEMA[3,])
+sum(TDFIEMA[4,])
+sum(TDFIEMA[5,])
+sum(TDFIEMA[6,])
+sum(TDFIEMA[7,])
+sum(TDFIEMA[8,])
+sum(TDFIEMA[9,])
+
+# Lower Lows and Higher Highs
+
+summary( (df_train2$LOWER_MIN_12))
+summary( (df_train2$HIGHER_MAX_12))
+
+
+df_pfas <- df_train2 %>% 
+  dplyr::select(Datetime,Open,High,Low,Close,TARGET,LOWER_MIN_12,HIGHER_MAX_12,
+                aux_tg_buy,aux_buy_stop,aux_tg_sell,aux_sell_stop)
+
+df_pfas$DIF_RANGE <- cut(df_pfas$LOWER_MIN_12,breaks = seq(0,1,by =0.1))
+
+KL<- table(df_pfas$DIF_RANGE,df_pfas$TARGET )
+
+dfL12 <- as.data.frame(KL[,3] / rowSums(KL))
+colnames(dfL12) <- c("Y")
+dfL12$Range <- rownames(dfL12)
+dfL12 <- dfL12 %>% dplyr::select(Range,Y) %>% filter(!(is.na(Y)))
+colnames(dfL12)[2] <- c("Sell Correct %")
+
+
+gL1<- ggplot(data = df_pfas,aes(x = LOWER_MIN_12)) +
+  geom_histogram(binwidth = 0.05, fill = "white", color = "#f54949") +
+  theme_classic() +
+  labs(title = "12 Lower Lows Histogram",
+       x = "12 Lower Lows")
+
+gL2 <- ggtexttable(dfL12,rows = NULL, theme = ttheme("blank") ) %>%
+  tab_add_hline(at.row = 1:2, row.side = "top", linewidth = 2) %>%
+  tab_add_hline(at.row = 9, row.side = "bottom", linewidth = 3, linetype = 1)
+
+
+
+df_pfas$DIF_RANGE <- cut(df_pfas$HIGHER_MAX_12,breaks = seq(0,1,by =0.1))
+
+KL<- table(df_pfas$DIF_RANGE,df_pfas$TARGET )
+
+dfL12 <- as.data.frame(KL[,3] / rowSums(KL))
+colnames(dfL12) <- c("Y")
+dfL12$Range <- rownames(dfL12)
+dfL12 <- dfL12 %>% dplyr::select(Range,Y) %>% filter(!(is.na(Y)))
+colnames(dfL12)[2] <- c("Buy Correct %")
+
+
+gH1<- ggplot(data = df_pfas,aes(x = LOWER_MIN_12)) +
+  geom_histogram(binwidth = 0.05, fill = "white", color = "#00AFBB") +
+  theme_classic() +
+  labs(title = "12 Higher Highs Histogram",
+       x = "12 Higher Highs")
+##f54949
+gH2 <- ggtexttable(dfL12,rows = NULL, theme = ttheme("blank") ) %>%
+  tab_add_hline(at.row = 1:2, row.side = "top", linewidth = 2) %>%
+  tab_add_hline(at.row = 9, row.side = "bottom", linewidth = 3, linetype = 1)
+
+
+ggarrange(gH1,gH2,
+          gL1,gL2,
+          ncol = 2, nrow = 2)
+
+
+############################Copulas############################
+
+df_formation_T <- df_train2 %>% 
+  dplyr::select(Datetime, R_USD, R_JPY) 
+u <- pobs(df_formation_T$R_USD)
+v <- pobs(df_formation_T$R_JPY)
+
+help(pobs)
+
+BiCopCompare(u,v,familyset=NA) # Comparing the BIC for each Family
+
+
+# Checking the number of 0
+
+df_check0 <- df_formation_T %>%
+  filter(R_USD == 0) %>%
+  mutate(HOUR_TRADE = hour(Datetime)) %>%
+  group_by(HOUR_TRADE) %>%
+  summarise(Quantity_0 = n()) %>%
+  arrange(HOUR_TRADE)
+
+df_check_aux <- df_formation_T %>%
+  mutate(HOUR_TRADE = hour(Datetime)) %>%
+  group_by(HOUR_TRADE) %>%
+  summarise(Quantity_0 = n()) %>%
+  arrange(HOUR_TRADE)
+
+# Percentage of 0
+sum(df_check0$Quantity_0) / nrow(df_formation_T)
+
+df_check0$Percentage_0 <- df_check0$Quantity_0 / df_check_aux$Quantity_0              
+
+plot.zoo(x = df_check0$Percentage_0)
+
+ggplot(data=df_check0 ,aes(x =HOUR_TRADE, y = Percentage_0)) +
+  geom_line() +
+  theme_classic() +
+  labs(title = "Percentage of no variation by hour",
+       x = "Hour",
+       y = "Percentage of no variation")
+
+mean(df_check0$Percentage_0[-(8:16)])
+mean(df_check0$Percentage_0[(8:16)])
+
+
+# Goodness of fit
+
+#Checking a small Sample
+
+a <- sample(x = 1:nrow(m) , size = 300) 
+
+gofWhite("t", m[a,], M = 10,processes = 5)
+
+#Checking a medium Sample
+set.seed(1995)
+a <- sample(x = 1:nrow(m) , size = 3000) # From 3K forward, p-value = 0
+
+gofWhite("t", m[a,], M = 10,processes = 5)
+
+
+# Checking full m dataset
+gofWhite("t", m, M = 10,processes = 5)
+
+
+# Spliting the data into 20 parts of equivalent size
+
+nrdff2 <- nrow(df_formation_T) 
+rdff2 <- round(nrdff2 / 20)
+aux_sp <- c(1,seq(rdff2,nrdff2,by = rdff2),nrdff2)
+
+m <- pobs(as.matrix(cbind(df_formation_T$R_USD,df_formation_T$R_JPY))) 
+
+k<-Sys.time()
+
+aux_t <- list()
+aux_df <-c()
+aux_th <- c()
+
+for(i in 1:(length(aux_sp) -1) )
+{ 
+  
+  a1 <- aux_sp[i]
+  a2 <- aux_sp[i+1] 
+  t <-gofWhite("t", m[a1:a2,], M =100 ,processes = 8)
+  aux_t[[i]] <- as.data.frame(t$t$res.tests)
+  aux_df[i] <-  t$t$df
+  aux_th[i] <-  t$t$theta
+  
+  print(i)
+  
+  
+}
+
+b<-Sys.time()
+k-b
+
+
+df_boostrap_gof <- bind_rows(aux_t)
+df_boostrap_gof$DF_EST <- aux_df
+df_boostrap_gof$THETA_EST <- aux_th
+df_boostrap_gof$SPLIT <- seq(1,20)
+table((df_boostrap_gof$p.value > 0.05))
+View(df_boostrap_gof)
+
+df_train$Datetime[aux_sp[13:14]]
+
+
+df_train2$Datetime[aux_sp[5:6]]
+
+df_train2$Datetime[aux_sp[7:8]]
+
+aux_cor<-c()
+aux_kend <- c()
+
+for(i in 1:(length(aux_sp) -1) )
+{
+  a1 <- aux_sp[i]
+  a2 <- aux_sp[i+1] 
+  aux_cor[i] <- cor(df_train2$Close[a1:a2],df_train2$JPY_Close[a1:a2],method = "pearson")
+  aux_kend[i] <- cor(df_train2$R_USD[a1:a2],df_train2$R_JPY[a1:a2],method = "kendall")
+  
+}
+aux_cor
+aux_kend
+
+#Checking Periods with < 0.05
+
+
+BiCopCompare(u[aux_sp[4:5]],v[aux_sp[4:5]],familyset=NA) # really interesting function
+# Independence
+
+BiCopCompare(u[aux_sp[5:6]],v[aux_sp[5:6]],familyset=NA) # really interesting function
+# Independence 
+
+BiCopCompare(u[aux_sp[13:14]],v[aux_sp[13:14]],familyset=NA) # really interesting function
+# Gaussian
+
+#Corplot
+library(corrplot)
+M <- cor(df_train2[,-c(1,17,46:50,52)]) # Removing Datetime and Target
+corrplot(M, method="color",tl.cex = 0.6,order = "hclust")
+corrplot(M, method = "color", type = "upper", order = "hclust")
+summary(df_train2)
+colnames(df_train2)
+library(ggpubr)
+
+#Plotting all the Combinations p-values
+gof_test <- ggdotchart( data = df_boostrap_gof, x = "SPLIT", y = "p.value" , sorting = "none",color = "#00AFBB",
+                        add = "segments", add.params = list(color = "lightgray", size = 1.5),
+                        dot.size = 4,
+                        ggtheme = theme_pubclean()) +
+  font("x.text", size = 9) +
+  labs(title = "White Test P-value by Split" ,
+       y = "P-value", x = "Split") +
+  geom_hline(yintercept=0.05, linetype='dotted', col = 'red') 
+
+
+# Adding T-COP 20 DYN to the model
+
+# Calculating the Probability function according to df_formation 
+
+F_R_USD <- ecdf(df_train2$R_USD)
+F_R_JPY <- ecdf(df_train2$R_JPY)
+
+# Transforming df_pred returns into pseudo-values
+
+df_train2$U1 <- F_R_USD(df_train2$R_USD)
+df_train2$U2 <- F_R_JPY(df_train2$R_JPY)
+
+# Using df_formation, the best copula was T-Copula
+# Bivariate copula: t (par = 0.23, par2 = 3.37, tau = 0.15) 
+#Fitting Copula according to df_formation:
+
+df_train2 <- df_train2 %>%
+  mutate(T_COP = BiCopHfunc1(U1,U2,family = 2, 
+                             par = 0.23, par2 =3.37 )) 
+
+df_train2$T_COP_EMA20 <- EMA(df_train2$T_COP,n=20,wilder = TRUE)
+
+# Adding Dynamics
+
+df_train2 <- df_train2 %>%
+  mutate(T_COP_DYN = BiCopHfunc1(U1,U2,family = 2, 
+                                 par = Rolling_Kendall, par2 =3.37 ))
+
+df_train2$T_COP_DYN_EMA20 <- EMA(df_train2$T_COP_DYN,n=20,wilder = TRUE)
+
+df_train2_F <- df_train2[-(1:19),]
+# MODEL APPLICATION
+
+#Model with All variables
+colnames(df_train2)
+
+set.seed(1966)
+mod_all <-  randomForest(TARGET ~ . - AUX_TG - Datetime  ,
+                         ntree = 1000,  data = df_train2_F)
+
+plot(mod)
+
+mod
+
+View(mod_all$importance)
+
+mod_all_imp<- as.data.frame(mod_all$importance)
+
+mod2_variables <- row.names(filter(mod_all_imp,MeanDecreaseGini > 200))
+mod2_variables<- paste(mod2_variables,collapse =" + ")
+
+#Model Removing some variables
+
+mod_all_imp<- as.data.frame(mod_all$importance)
+
+mod2_variables <- row.names(filter(mod_all_imp,MeanDecreaseGini > 200))
+mod2_variables<- paste(mod2_variables,collapse =" + ")
+
+set.seed(1966)
+mod_2 <- randomForest(TARGET ~ Open + High + Low + Close + JPY_Close +
+                        Close_1 + Jpy_1 + R_USD + R_JPY + Max_Min_diff + SD20 + 
+                        aux_tg_buy + aux_buy_stop + aux_tg_sell + aux_sell_stop + MACD + MACD_Signal + MACD_Product + EMA_20 + EMA_200 + 
+                        RSI_14 + CANDLE_BODY + PRICE_VARIATION_12 + PRICE_VARIATION_24 + 
+                        PRICE_VARIATION_36 + HIGHER_MAX_12 + LOWER_MIN_12 + DIF_CLOSE_EMA20 + 
+                        DIF_LOW_EMA20 + DIF_HIGH_EMA20 + DIF_CLOSE_EMA200 + COUNT_SEQ_CLOSE_EMA20 +
+                        COUNT_SEQ_LOW_EMA20 + COUNT_SEQ_HIGH_EMA20 + Rolling_Kendall + U1 + U2 + 
+                        T_COP + T_COP_EMA20 + T_COP_DYN + T_COP_DYN_EMA20,
+                      ntree = 1500,  data = df_train2_F)
+
+View(mod_2$importance)
+
+
+#Final Model
+
+set.seed(1966)
+mod4 <-  randomForest(TARGET ~  SD20  + MACD + MACD_Signal +  MACD_Product +
+                        LOWER_MIN_12 + HIGHER_MAX_12 + PRICE_VARIATION_24 +
+                        RSI_14 + DIF_CLOSE_EMA20 +  DIF_LOW_EMA20  + DIF_HIGH_EMA20 +       
+                        DIF_CLOSE_EMA200 + COUNT_SEQ_CLOSE_EMA20 + COUNT_SEQ_LOW_EMA20 +  
+                        COUNT_SEQ_HIGH_EMA20 +  Rolling_Kendall + T_COP_DYN_EMA20 ,
+                      ntree = 1500,  data = df_train2_F)
+
+plot(mod4)
+
+View(mod4$importance)
+
+
+################################Importing Datasets From Jul to Sep##########
+
+eur_usd_new <- read_excel("C:\\Users\\berna\\OneDrive\\Documentos\\DS_Master\\Articles Forex\\Data\\Eur_Usd_202407_202409.xlsx")
+
+eur_jpy_new <- read_excel("C:\\Users\\berna\\OneDrive\\Documentos\\DS_Master\\Articles Forex\\Data\\Eur_Jpy_202407_202409.xlsx")
+
+
+# Adjusting the number of observation
+
+aux_usd <- unique(eur_usd_new$Datetime)
+
+aux_jpy <- unique(eur_jpy_new$Datetime)
+
+x_obsjpy <- which(aux_jpy %in% aux_usd) 
+x_obsusd <- which(aux_usd %in% aux_jpy) 
+
+eur_usd_2 <- eur_usd_new[x_obsusd,-(6:8)]
+eur_jpy_2 <- eur_jpy_new[x_obsjpy,-(6:8)]
+
+# Defining final dataset
+
+#Considering only the JPY close price
+
+df_j_new <- cbind(eur_usd_2, eur_jpy_2$Close)
+colnames(df_j_new)[6] <- c("JPY_Close")
+head(df_j_new)
+
+
+#Including variables
+df_j2 <- df_j_new %>%
+  mutate(Close_1 = lag(Close,1),
+         Jpy_1 = lag(JPY_Close,1) 
+  ) %>%
+  mutate(R_USD = (Close / Close_1 -1) ,
+         R_JPY = (JPY_Close / Jpy_1 -1)
+  )
+
+
+# Target
+
+df_j_aux <- df_j2 %>%
+  mutate(Max_Min_diff = High - Low)
+
+# Creating the 20 moving standard deviation
+
+nr <- nrow(df_j_aux)
+sd20 <- c(rep(0,19))
+
+for( i in 20:nr)
+{ 
+  sd20[i] <- median(df_j_aux$Max_Min_diff[(i-19):i])
+  
+}
+
+df_j_aux$SD20 <- sd20
+
+#Setting the parameters (Potential discussion)
+
+good_R <- 4
+bad_R <- 2
+df_j_aux <- df_j_aux %>%
+  mutate(aux_tg_buy = Close + good_R*SD20,
+         aux_buy_stop = Close - bad_R*SD20,
+         
+         aux_tg_sell = Close - good_R*SD20,
+         aux_sell_stop = Close + bad_R*SD20
+  )
+
+
+# Generating Target
+aux_tg <- c()
+n200<- nrow(df_j_aux)-200
+
+for( i in 1:n200)
+  
+{
+  #i = 13150
+  sim_close <- df_j_aux$Close[i] 
+  sim_SD20 <- df_j_aux$SD20[i]
+  sim_tg_buy <- sim_close + good_R*sim_SD20
+  sim_tg_sell <- sim_close - good_R*sim_SD20 
+  sim_stop_buy <- sim_close - bad_R*sim_SD20
+  sim_stop_sell <- sim_close + bad_R*sim_SD20 
+  
+  vec_aux_max <- df_j_aux$High[(i+1):(i+200)]
+  vec_aux_min <- df_j_aux$Low[(i+1):(i+200)]
+  
+  sim_min_speed_buy <- min(which(sim_tg_buy <= vec_aux_max))
+  
+  sim_min_speed_sell <- min(which(sim_tg_sell >= vec_aux_min))
+  
+  #Verifying which occurred firstly
+  aux_2 <- ifelse(sim_min_speed_buy == Inf & sim_min_speed_sell == Inf, 0,
+                  ifelse(sim_min_speed_buy < sim_min_speed_sell,1,-1))
+  
+  # Generating the Speed of each Stoploss
+  
+  sim_min_speed_buy_STOP <- min(which(sim_stop_buy >= vec_aux_min))
+  
+  sim_min_speed_sell_STOP <- min(which(sim_stop_sell <= vec_aux_max))
+  
+  aux_tg[i]  <-   ifelse(aux_2 == 1 & sim_min_speed_buy < sim_min_speed_buy_STOP, "Buy Correct",
+                         ifelse(aux_2 == 1 & sim_min_speed_buy >= sim_min_speed_buy_STOP, "Buy Incorrect",
+                                ifelse(aux_2 == -1 & sim_min_speed_sell < sim_min_speed_sell_STOP, "Sell Correct",
+                                       ifelse(aux_2 == -1 & sim_min_speed_sell >= sim_min_speed_sell_STOP, "Sell Incorrect","No conclusion"
+                                       ))))
+  
+}
+
+df_j_aux2 <-  df_j_aux[1:n200,]
+df_j_aux2$AUX_TG <- aux_tg
+
+
+# Techinical indicators
+
+# MACD
+MACD_Feature <- MACD(df_j_aux2$Close,nFast = 23, nSlow = 39, nSig = 13,percent = TRUE)
+
+#nFast = 5, nSlow = 14, nSig = 20
+
+df_j_aux2$MACD <- MACD_Feature[,1] * 100
+df_j_aux2$MACD_Signal <- MACD_Feature[,2] * 100
+df_j_aux2$MACD_Product <- df_j_aux2$MACD - df_j_aux2$MACD_Signal
+
+# EMA's and RSI
+
+#Calculating Exponential Moving Average and RSI
+
+
+df_j_aux2 <- df_j_aux2 %>%
+  mutate(EMA_20 = EMA(Close,n=20,wilder = TRUE),
+         EMA_200 = EMA(Close,n=200),
+         RSI_14 = RSI(Close,n=14)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    CANDLE_BODY = abs(Close - Open),
+    LOWER_SHADOW = min(Close,Open) - Low,
+    UPPER_SHADOW = High - max(Close,Open),
+  ) %>%
+  
+  dplyr::ungroup() %>%
+  mutate(HIGHER_MAX = ifelse(High > dplyr::lag(High,1),1,0),
+         LOWER_MIN = ifelse(Low < dplyr::lag(Low,1),1,0),
+         PRICE_VARIATION_12 = Close / dplyr::lag(Close,12),
+         PRICE_VARIATION_24 = Close / dplyr::lag(Close,24),
+         PRICE_VARIATION_36 = Close / dplyr::lag(Close,36)
+  ) %>%
+  mutate(HIGHER_MAX_12 = EMA(HIGHER_MAX,n=12,wilder = TRUE),
+         LOWER_MIN_12 = EMA(LOWER_MIN,n=12,wilder = TRUE)
+  )
+
+
+#Calculating the difference between the OLHC prices against the averages
+
+df_j_aux2$DIF_CLOSE_EMA20 = df_j_aux2$Close - df_j_aux2$EMA_20 
+df_j_aux2$DIF_LOW_EMA20 = df_j_aux2$Low - df_j_aux2$EMA_20 
+df_j_aux2$DIF_HIGH_EMA20 = df_j_aux2$High - df_j_aux2$EMA_20 
+df_j_aux2$DIF_CLOSE_EMA200 = df_j_aux2$Close - df_j_aux2$EMA_200 
+
+#Calculating dummy variables to identify if the averages are greater or lower than the OLCH prices
+
+df_j_aux3 <- df_j_aux2 %>%
+  mutate(TIME_DIF_CLOSE_EMA20 = ifelse(DIF_CLOSE_EMA20 > 0 ,1,-1),
+         TIME_DIF_LOW_EMA20 = ifelse(DIF_LOW_EMA20 > 0 ,1,-1),
+         TIME_DIF_HIGH_EMA20 = ifelse(DIF_HIGH_EMA20 > 0 ,1,-1),
+         TIME_DIF_CLOSE_EMA200 = ifelse(DIF_CLOSE_EMA200 > 0 ,1,-1)
+  ) 
+
+aux_time1 <- c(0)
+aux_time2 <- c(0)
+aux_time3 <- c(0)
+
+#Calculating sequences of consecutive points greater or lower than the averages
+
+for(i in 2:n200)
+{
+  aux_time1[i] <- ifelse(df_j_aux3$TIME_DIF_CLOSE_EMA20[i] * df_j_aux3$TIME_DIF_CLOSE_EMA20[i-1] == 1,
+                         df_j_aux3$TIME_DIF_CLOSE_EMA20[i] + aux_time1[i-1],0)
+  
+  aux_time2[i] <- ifelse(df_j_aux3$TIME_DIF_LOW_EMA20[i] * df_j_aux3$TIME_DIF_LOW_EMA20[i-1] == 1,
+                         df_j_aux3$TIME_DIF_LOW_EMA20[i] + aux_time2[i-1],0)
+  
+  aux_time3[i] <- ifelse(df_j_aux3$TIME_DIF_HIGH_EMA20[i] * df_j_aux3$TIME_DIF_HIGH_EMA20[i-1] == 1,
+                         df_j_aux3$TIME_DIF_HIGH_EMA20[i] + aux_time3[i-1],0)
+  
+}
+
+df_j_aux3$COUNT_SEQ_CLOSE_EMA20 <- aux_time1
+
+df_j_aux3$COUNT_SEQ_LOW_EMA20 <- aux_time2
+
+df_j_aux3$COUNT_SEQ_HIGH_EMA20 <- aux_time3
+
+# Adding Copula
+
+# Calculating rolling Kendall
+
+df_j3 <- df_j_aux3
+
+rolling_kendall <- c(rep(0.15,20))
+
+for(i in 21:n200)
+{ 
+  k <- cor(df_j3$R_USD[(i-19):i],df_j3$R_JPY[(i-19):i],method = "kendall")
+  rolling_kendall[i] <- k
+}
+
+plot.zoo(rolling_kendall)
+summary(rolling_kendall)
+
+a <- 1
+while(a > 0)
+{
+  
+  rkmis <- which_na(rolling_kendall)
+  a <-length(rkmis)
+  if(length(rkmis) >= 1){ rolling_kendall[rkmis] <- rolling_kendall[rkmis-1]}
+}
+
+df_j3$Rolling_Kendall <- rolling_kendall
+
+df_pred <- df_j3[-1,]
+
+
+# Transforming df_pred returns into pseudo-values
+
+df_pred$U1 <- F_R_USD(df_pred$R_USD)
+df_pred$U2 <- F_R_JPY(df_pred$R_JPY)
+
+# Using df_formation, the best copula was T-Copula
+# Bivariate copula: t (par = 0.23, par2 = 3.37, tau = 0.15) 
+#Fitting Copula according to df_formation:
+
+df_pred2 <- df_pred %>%
+  mutate(T_COP = BiCopHfunc1(U1,U2,family = 2, 
+                             par = 0.23, par2 =3.37 )) 
+
+df_pred2$T_COP_EMA20 <- EMA(df_pred2$T_COP,n=20,wilder = TRUE)
+
+# Adding Dynamics
+
+df_pred2 <- df_pred2 %>%
+  mutate(T_COP_DYN = BiCopHfunc1(U1,U2,family = 2, 
+                                 par = Rolling_Kendall, par2 =3.37 ))
+
+df_pred2$T_COP_DYN_EMA20 <- EMA(df_pred2$T_COP_DYN,n=20,wilder = TRUE)
+
+
+# Defining Target
+
+df_test2 <- df_pred2[-(1:199),] %>%
+  mutate(TARGET = as.factor(
+    ifelse(AUX_TG %in% c('Sell Incorrect','Buy Incorrect','No conclusion'),"No Trading",AUX_TG)
+  ))
+
+summary(df_test2$TARGET)
+
+
+################################Model Application###############################
+
+# Precision 
+
+# Model All
+ptest<- predict(mod_all,df_test2,type = "vote")
+head(ptest)
+
+tsell<-table((ptest[,3] > 0.55),df_test2$TARGET)
+tsell
+tsell[2,3] / sum(tsell[2,]) #Sell % Precision
+sum(tsell[2,]) # NumObs Sell
+
+tbuy<-table((ptest[,1] > 0.55),df_test2$TARGET)
+tbuy
+tbuy[2,1] / sum(tbuy[2,]) #Buy % Precision
+sum(tbuy[2,]) # NumObs Buy
+
+
+# Model 2
+ptest<- predict(mod_2,df_test2,type = "vote")
+head(ptest)
+head(df_test2$TARGET)
+
+tsell<-table((ptest[,3] > 0.55),df_test2$TARGET)
+tsell
+tsell[2,3] / sum(tsell[2,])
+sum(tsell[2,])
+
+tbuy<-table((ptest[,1] > 0.55),df_test2$TARGET)
+tbuy
+tbuy[2,1] / sum(tbuy[2,])
+sum(tbuy[2,])
+
+# Model 4
+ptest<- predict(mod4,df_test2,type = "vote")
+head(ptest)
+
+tsell<-table((ptest[,3] > 0.65),df_test2$TARGET)
+tsell
+tsell[2,3] / sum(tsell[2,])
+sum(tsell[2,])
+
+tbuy<-table((ptest[,1] > 0.65),df_test2$TARGET)
+tbuy
+tbuy[2,1] / sum(tbuy[2,])
+sum(tbuy[2,])
+
+df_test2$PROBABILITY_BUY <- ptest[,1] 
+df_test2$PROBABILITY_SELL <- ptest[,3] 
+
+
+#######Feature Importance and PDD
+
+df_triplot_train <- df_train2_F %>%
+  dplyr::select(TARGET, T_COP_DYN_EMA20, RSI_14, MACD,SD20,MACD_Signal,
+                MACD_Product,LOWER_MIN_12, HIGHER_MAX_12,PRICE_VARIATION_24,
+                DIF_CLOSE_EMA20,  DIF_LOW_EMA20, DIF_HIGH_EMA20,       
+                DIF_CLOSE_EMA200,COUNT_SEQ_LOW_EMA20,  
+                COUNT_SEQ_HIGH_EMA20, COUNT_SEQ_CLOSE_EMA20,Rolling_Kendall,
+  ) %>%
+  dplyr::ungroup()
+
+cor(df_triplot_train[,-1])
+
+set.seed(1995)
+a <- sample(x = seq(1:nrow(df_train2)), size = 3000)
+
+predict_vote <- function(model, newdata) {
+  predict(model, newdata, type = "vote")  # Returns probabilities
+}
+
+explainer <- DALEX::explain(mod4,
+                            data = df_triplot_train[a,-1],
+                            y = df_triplot_train$TARGET[a],
+                            predict_function = predict_vote,
+                            label = "Model 4"
+)
+
+resids <-  model_performance(explainer)
+p1 <- plot(resids)
+p2 <- plot(resids, geom = "boxplot")
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+
+help("variable_importance")
+vip <- variable_importance(explainer)
+plot(vip) +
+  theme(
+    axis.text.x = element_text(size = 14),  # Increase font size for x-axis labels
+    axis.text.y = element_text(size = 14),  # Increase font size for y-axis labels
+    axis.title.x = element_text(size = 16), # Increase font size for x-axis title
+    axis.title.y = element_text(size = 16)  # Increase font size for y-axis title
+  )
+
+sv_DIF <- single_variable(explainer, variable = "DIF_CLOSE_EMA200",type = "pdp")
+sv_T_COP <- single_variable(explainer, variable = "T_COP_DYN_EMA20",type = "pdp")
+sv_RSI <- single_variable(explainer, variable = "RSI_14",type = "pdp")
+sv_Low <- single_variable(explainer, variable = "LOWER_MIN_12",type = "pdp")
+
+plot(sv_DIF)
+
+gridExtra::grid.arrange(plot(sv_RSI),plot(sv_DIF),plot(sv_T_COP),plot(sv_Low), nrow = 2)
+
+
+
+
+#######Financial Comparison
+# Measuring RS1
+
+ggplot(data = df_test, aes(x = RSI_14)) +
+  geom_histogram(color = "black", fill = "blue" ) +
+  theme_classic() +
+  geom_vline(xintercept = 30,color = "red") +
+  geom_vline(xintercept = 70,color = "red")
+
+quantile(df_test$RSI_14,seq(0,1,0.05))
+
+
+df_pfas <- df_test2 %>% 
+  dplyr::select(Datetime,Open,High,Low,Close,TARGET,RSI_14,aux_tg_buy,aux_buy_stop,aux_tg_sell,aux_sell_stop) %>%
+  mutate(STR_RSI = ifelse(RSI_14 < 30 & dplyr::lag(RSI_14,1) > 30 , "Buy", 
+                          ifelse(RSI_14 > 70 & dplyr::lag(RSI_14,1) < 70, "Sell","No Trading")))
+
+table(df_pfas$STR_RSI, df_pfas$TARGET)
+
+
+# Assuming Comission Cost of 2Pips which would be 2 euro
+
+A2 <- df_pfas %>% 
+  mutate(FINAL_RESULT = ifelse(STR_RSI == "Buy" & TARGET == "Buy Correct", aux_tg_buy - Close,
+                               ifelse(STR_RSI == "Buy" & TARGET != "Buy Correct", aux_buy_stop - Close,       
+                                      ifelse(STR_RSI == "Sell" & TARGET == "Sell Correct", Close - aux_tg_sell,
+                                             ifelse(STR_RSI == "Sell" & TARGET != "Sell Correct", Close - aux_sell_stop, 0
+                                             ))))) %>%
+  group_by(STR_RSI,TARGET) %>%
+  summarise(P_and_L = sum(FINAL_RESULT) / 0.0001,
+            Count_Transaction = n()) %>%
+  filter(STR_RSI != 'No Trading')
+A2  
+
+#Count Transaction
+sum(A2$Count_Transaction)
+#Gross Gain
+(gg <- sum(A2[,3]))
+#Gross Gain %
+(gg / 100000)
+#Gross Cost
+(gc <- sum(A2[,4]) * 2)
+#Net Gain
+(ng <- gg - gc)
+#Net Gain %
+(ng / 10000)
+#Avg Gain
+pst <- which(A2[,3] > 0)
+(avg_g <- sum(A2[pst , 3]) / sum(A2[pst , 4]))
+# Max Gain
+(max_g <- max(A2[pst , 5]))
+# Max Loss
+(max_l <- min(A2[, 6]))
+
+
+# Measuring the Model
+
+
+df_pfas2 <- df_test2 %>% 
+  dplyr::select(Datetime,Open,High,Low,Close,TARGET,PROBABILITY_BUY,PROBABILITY_SELL,aux_tg_buy,aux_buy_stop,aux_tg_sell,aux_sell_stop) %>%
+  mutate(STR_RSI = ifelse(PROBABILITY_BUY > 0.65 , "Buy", 
+                          ifelse(PROBABILITY_SELL > 0.65 , "Sell","No Trading")))
+
+table(df_pfas2$STR_RSI, df_pfas2$TARGET)
+
+38 / (38 + 15 + 16)
+29 / (6 + 14 + 29)
+
+
+22 / (22+14+16)
+26 / (3 + 9 + 26)
+# Assuming Comission Cost of 2Pips which would be 2 euro
+
+A2 <- df_pfas2 %>% 
+  mutate(FINAL_RESULT = ifelse(STR_RSI == "Buy" & TARGET == "Buy Correct", aux_tg_buy - Close,
+                               ifelse(STR_RSI == "Buy" & TARGET != "Buy Correct", aux_buy_stop - Close,       
+                                      ifelse(STR_RSI == "Sell" & TARGET == "Sell Correct", Close - aux_tg_sell,
+                                             ifelse(STR_RSI == "Sell" & TARGET != "Sell Correct", Close - aux_sell_stop, 0
+                                             ))))) %>%
+  group_by(STR_RSI,TARGET) %>%
+  summarise(P_and_L = sum(FINAL_RESULT) / 0.0001,
+            Count_Transaction = n(),
+            MAX_P_and_L = max(FINAL_RESULT) / 0.0001,
+            MIN_P_and_L = min(FINAL_RESULT) / 0.0001) %>%
+  filter(STR_RSI != 'No Trading')
+A2  
+
+#Count Transaction
+sum(A2$Count_Transaction)
+#Gross Gain
+(gg <- sum(A2[,3]))
+#Gross Gain %
+(gg / 10000)
+#Gross Cost
+(gc <- sum(A2[,4]) * 2)
+#Net Gain
+(ng <- gg - gc)
+#Net Gain %
+(ng / 10000)
+#Avg Gain
+pst <- which(A2[,3] > 0)
+(avg_g <- sum(A2[pst , 3]) / sum(A2[pst , 4]))
+# Max Gain
+(max_g <- max(A2[pst , 5]))
+# Max Loss
+(max_l <- min(A2[, 6]))
+
+
+
+# Measuring the Copula
+summary(df_test2$T_COP_DYN_EMA20)
+
+df_pfas2 <- df_test2 %>% 
+  dplyr::select(Datetime,Open,High,Low,Close,TARGET,T_COP_DYN_EMA20,aux_tg_buy,aux_buy_stop,aux_tg_sell,aux_sell_stop) %>%
+  mutate(STR_RSI = ifelse(T_COP_DYN_EMA20 < 0.35 & T_COP_DYN_EMA20 <  dplyr::lag(T_COP_DYN_EMA20,1) , "Buy", 
+                          ifelse(T_COP_DYN_EMA20 > 0.65 & T_COP_DYN_EMA20 >  dplyr::lag(T_COP_DYN_EMA20,1) , "Sell","No Trading")))
+
+table(df_pfas2$STR_RSI, df_pfas2$TARGET)
+
+25 / (25 + 21 + 22)
+13 / (6 + 10 + 13)
+
+# Assuming Comission Cost of 2Pips which would be 2 euro
+
+A2 <- df_pfas2 %>% 
+  mutate(FINAL_RESULT = ifelse(STR_RSI == "Buy" & TARGET == "Buy Correct", aux_tg_buy - Close,
+                               ifelse(STR_RSI == "Buy" & TARGET != "Buy Correct", aux_buy_stop - Close,       
+                                      ifelse(STR_RSI == "Sell" & TARGET == "Sell Correct", Close - aux_tg_sell,
+                                             ifelse(STR_RSI == "Sell" & TARGET != "Sell Correct", Close - aux_sell_stop, 0
+                                             ))))) %>%
+  group_by(STR_RSI,TARGET) %>%
+  summarise(P_and_L = sum(FINAL_RESULT) / 0.0001,
+            Count_Transaction = n(),
+            MAX_P_and_L = max(FINAL_RESULT) / 0.0001,
+            MIN_P_and_L = min(FINAL_RESULT) / 0.0001) %>%
+  filter(STR_RSI != 'No Trading')
+A2  
+
+#Count Transaction
+sum(A2$Count_Transaction)
+#Gross Gain
+(gg <- sum(A2[,3]))
+#Gross Gain %
+(gg / 10000)
+#Gross Cost
+(gc <- sum(A2[,4]) * 2)
+#Net Gain
+(ng <- gg - gc)
+#Net Gain %
+(ng / 10000)
+
+#Avg Gain
+pst <- which(A2[,3] > 0)
+(avg_g <- sum(A2[pst , 3]) / sum(A2[pst , 4]))
+# Max Gain
+(max_g <- max(A2[pst , 5]))
+# Max Loss
+(max_l <- min(A2[, 6]))
+
+
+# Measuring RSI + MACD
+
+df_pfas2 <- df_test2 %>% 
+  dplyr::select(Datetime,Open,High,Low,Close,TARGET,RSI_14,MACD_Product,MACD,MACD_Signal,aux_tg_buy,aux_buy_stop,aux_tg_sell,aux_sell_stop) %>%
+  mutate(STR_RSI = ifelse(MACD_Product > 0 &  dplyr::lag(MACD_Product,1) < 0 & RSI_14 > 50 & dplyr::lag(RSI_14,1) < 50 , "Buy", 
+                          ifelse(MACD_Product < 0 & dplyr::lag(MACD_Product,1) > 0 & RSI_14 < 50 & dplyr::lag(RSI_14,1) > 50, "Sell","No Trading")))
+
+table(df_pfas2$STR_RSI, df_pfas2$TARGET)
+
+302 / (302 + 290 + 295)
+220 / (299 + 271 + 220)
+
+# Assuming Comission Cost of 2Pips which would be 2 euro
+
+A2 <- df_pfas2 %>% 
+  mutate(FINAL_RESULT = ifelse(STR_RSI == "Buy" & TARGET == "Buy Correct", aux_tg_buy - Close,
+                               ifelse(STR_RSI == "Buy" & TARGET != "Buy Correct", aux_buy_stop - Close,       
+                                      ifelse(STR_RSI == "Sell" & TARGET == "Sell Correct", Close - aux_tg_sell,
+                                             ifelse(STR_RSI == "Sell" & TARGET != "Sell Correct", Close - aux_sell_stop, 0
+                                             ))))) %>%
+  group_by(STR_RSI,TARGET) %>%
+  summarise(P_and_L = sum(FINAL_RESULT) / 0.0001,
+            Count_Transaction = n(),
+            MAX_P_and_L = max(FINAL_RESULT) / 0.0001,
+            MIN_P_and_L = min(FINAL_RESULT) / 0.0001) %>%
+  filter(STR_RSI != 'No Trading')
+A2  
+
+#Count Transaction
+sum(A2$Count_Transaction)
+#Gross Gain
+(gg <- sum(A2[,3]))
+#Gross Gain %
+(gg / 100000)
+#Gross Cost
+(gc <- sum(A2[,4]) * 2)
+#Net Gain
+(ng <- gg - gc)
+#Net Gain %
+(ng / 10000)
+#Avg Gain
+pst <- which(A2[,3] > 0)
+(avg_g <- sum(A2[pst , 3]) / sum(A2[pst , 4]))
+# Max Gain
+(max_g <- max(A2[pst , 5]))
+# Max Loss
+(max_l <- min(A2[, 6]))
+
+
+# Financial Graph
+
+df_pfas2 <- df_test2 %>% 
+  dplyr::select(Datetime,Open,High,Low,Close,TARGET,PROBABILITY_BUY,PROBABILITY_SELL,aux_tg_buy,aux_buy_stop,aux_tg_sell,aux_sell_stop) %>%
+  mutate(STR_RSI = ifelse(PROBABILITY_BUY > 0.65 , "Buy", 
+                          ifelse(PROBABILITY_SELL > 0.65 , "Sell","No Trading"))) %>%
+  filter(STR_RSI != "No Trading") %>%
+  mutate(FINAL_RESULT = ifelse(STR_RSI == "Buy" & TARGET == "Buy Correct", aux_tg_buy - Close,
+                               ifelse(STR_RSI == "Buy" & TARGET != "Buy Correct", aux_buy_stop - Close,       
+                                      ifelse(STR_RSI == "Sell" & TARGET == "Sell Correct", Close - aux_tg_sell,
+                                             ifelse(STR_RSI == "Sell" & TARGET != "Sell Correct", Close - aux_sell_stop, 0
+                                             )))))
+
+aux_financial <- c()
+Crt <- 10000
+for(i in 1:nrow(df_pfas2))
+{
+  
+  x <- df_pfas2$FINAL_RESULT[i] / (Crt * 10^(-8))
+  Crt <- Crt + x -2
+  aux_financial[i] <- Crt
+}
+df_pfas2$Investment <- aux_financial
+
+
+g_fin <- ggplot(data = df_pfas2, aes(x = Datetime, y = Investment)) +
+  geom_line(color = '#00AFBB', size = 1.05) +
+  theme_classic() + 
+  geom_hline(yintercept =10000 , color ='red' , linetype = 'dashed') +
+  labs(title = "10K Investment over test period")
+g_fin  
+
+ggsave(
+  filename = "C:\\Users\\berna\\OneDrive\\Documentos\\DS_Master\\Articles Forex\\Images_Thesis\\Model_Investment.pdf",  # Name of the file
+  plot = g_fin,                                # The ggplot object
+  device = "pdf",                          # File format
+  width = 8,                               # Width of the plot in inches
+  height = 6                               # Height of the plot in inches
+)
+
+#Discussion Section Graphs
+
+# Raw Plot of the curves
+
+usdplt1 <- xyplot(Close~ Datetime,
+                  data = df_test2, type = "l")
+jpyplt1<- xyplot(JPY_Close~ Datetime,
+                 data = df_test2, type = "l")
+
+combplt1 <- latticeExtra::doubleYScale(usdplt1,jpyplt1,style1 = 1, style2 = 4, 
+                                       add.ylab2 = TRUE,
+                                       ylab = "EUR/USD",
+                                       ylab2 = "EUR/JPY")
+combplt1 <- update(combplt1,main = "Eur/Usd and Eur/Jpy between Jan-2024 and May-2024")
+combplt1
+
+
+
+# Selling Plot
+
+df_pfas2 <- df_test2 %>% 
+  dplyr::select(Datetime,Open,High,Low,Close,TARGET,PROBABILITY_BUY,PROBABILITY_SELL,aux_tg_buy,aux_buy_stop,aux_tg_sell,aux_sell_stop) %>%
+  mutate(STR_RSI = ifelse(PROBABILITY_BUY > 0.65 , "Buy", 
+                          ifelse(PROBABILITY_SELL > 0.65 , "Sell","No Trading"))) %>%
+  filter(STR_RSI != "No Trading") %>%
+  mutate(FINAL_RESULT = ifelse(STR_RSI == "Buy" & TARGET == "Buy Correct", aux_tg_buy - Close,
+                               ifelse(STR_RSI == "Buy" & TARGET != "Buy Correct", aux_buy_stop - Close,       
+                                      ifelse(STR_RSI == "Sell" & TARGET == "Sell Correct", Close - aux_tg_sell,
+                                             ifelse(STR_RSI == "Sell" & TARGET != "Sell Correct", Close - aux_sell_stop, 0
+                                             )))))
+
+
+df_gsell <- df_test2 %>% filter(Datetime >= as.POSIXct("2024-07-02 00:00:00") &
+                                  Datetime <=as.POSIXct("2024-09-28 00:00:00")
+)  
+
+gg_sell <- ggplot(data = df_gsell, aes(x = Datetime, y = Close)) +
+  geom_line() +
+  geom_segment(aes(x = as.POSIXct("2024-08-05 09:05:00"), xend = as.POSIXct("2024-08-05 09:05:00"),  y = 1.104, yend = 1.1025),
+               arrow = arrow(length = unit(0.2, "cm"), type = "closed"),
+               color = "red",
+               size = 1.1,
+  ) +
+  geom_segment(aes(x = as.POSIXct("2024-08-23 15:10:00"), xend = as.POSIXct("2024-08-23 15:10:00"),  y = 1.114, yend = 1.1125),
+               arrow = arrow(length = unit(0.2, "cm"), type = "closed"),
+               color = "red",
+               size = 1.1,
+  ) +
+  geom_segment(aes(x = as.POSIXct("2024-07-11 14:20:00"), xend = as.POSIXct("2024-07-11 14:20:00"),  y = 1.09, yend = 1.0885),
+               arrow = arrow(length = unit(0.2, "cm"), type = "closed"),
+               color = "red",
+               size = 1.1,
+  ) +
+  geom_segment(aes(x = as.POSIXct("2024-09-10 00:15:00"), xend = as.POSIXct("2024-09-10 00:15:00"),  y = 1.114, yend = 1.1125),
+               arrow = arrow(length = unit(0.2, "cm"), type = "closed"),
+               color = "red",
+               size = 1.1,
+  ) +
+  labs(title = "Sell Transactions Despite Upward Trend",
+       y = "EUR/USD") +
+  theme_classic()
+
+gg_sell
+
+ggsave(
+  filename = "C:\\Users\\berna\\OneDrive\\Documentos\\DS_Master\\Articles Forex\\Images_Thesis\\Model_Sell.pdf",  # Name of the file
+  plot = gg_sell,                                # The ggplot object
+  device = "pdf",                          # File format
+  width = 12,                               # Width of the plot in inches
+  height = 9                               # Height of the plot in inches
+)
+
+
+
+#### Copulas Comparison
+
+set.seed(1995)
+
+mod_No_Cop <- randomForest(TARGET ~  SD20  + MACD + MACD_Signal +  MACD_Product +
+                                      LOWER_MIN_12 + HIGHER_MAX_12 + PRICE_VARIATION_24 +
+                                      RSI_14 + DIF_CLOSE_EMA20 +  DIF_LOW_EMA20  + DIF_HIGH_EMA20 +       
+                                      DIF_CLOSE_EMA200 + COUNT_SEQ_CLOSE_EMA20 + COUNT_SEQ_LOW_EMA20 +  
+                                      COUNT_SEQ_HIGH_EMA20 ,
+                                    ntree = 1500,  data = df_train2_F)
+
+
+# Model No Cop
+
+ptest<- predict(mod_No_Cop,df_test2,type = "vote")
+head(ptest)
+
+tsell<-table((ptest[,3] > 0.55),df_test2$TARGET)
+tsell
+tsell[2,3] / sum(tsell[2,])
+sum(tsell[2,])
+
+tbuy<-table((ptest[,1] > 0.55),df_test2$TARGET)
+tbuy
+tbuy[2,1] / sum(tbuy[2,])
+sum(tbuy[2,])
+
+
+# Measuring Model No Cop
+df_test_2_no_cop <- df_test2
+
+df_test_2_no_cop$PROBABILITY_BUY <- ptest[,1]
+df_test_2_no_cop$PROBABILITY_SELL <- ptest[,3]
+  
+df_pfas2 <- df_test_2_no_cop %>% 
+  dplyr::select(Datetime,Open,High,Low,Close,TARGET,PROBABILITY_BUY,PROBABILITY_SELL,aux_tg_buy,aux_buy_stop,aux_tg_sell,aux_sell_stop) %>%
+  mutate(STR_RSI = ifelse(PROBABILITY_BUY > 0.65 , "Buy", 
+                          ifelse(PROBABILITY_SELL > 0.65 , "Sell","No Trading")))
+
+table(df_pfas2$STR_RSI, df_pfas2$TARGET)
+
+38 / (38 + 15 + 16)
+29 / (6 + 14 + 29)
+
+
+22 / (22+14+16)
+26 / (3 + 9 + 26)
+# Assuming Comission Cost of 2Pips which would be 2 euro
+
+A2 <- df_pfas2 %>% 
+  mutate(FINAL_RESULT = ifelse(STR_RSI == "Buy" & TARGET == "Buy Correct", aux_tg_buy - Close,
+                               ifelse(STR_RSI == "Buy" & TARGET != "Buy Correct", aux_buy_stop - Close,       
+                                      ifelse(STR_RSI == "Sell" & TARGET == "Sell Correct", Close - aux_tg_sell,
+                                             ifelse(STR_RSI == "Sell" & TARGET != "Sell Correct", Close - aux_sell_stop, 0
+                                             ))))) %>%
+  group_by(STR_RSI,TARGET) %>%
+  summarise(P_and_L = sum(FINAL_RESULT) / 0.0001,
+            Count_Transaction = n(),
+            MAX_P_and_L = max(FINAL_RESULT) / 0.0001,
+            MIN_P_and_L = min(FINAL_RESULT) / 0.0001) %>%
+  filter(STR_RSI != 'No Trading')
+A2  
+
+#Count Transaction
+sum(A2$Count_Transaction)
+#Gross Gain
+(gg <- sum(A2[,3]))
+#Gross Gain %
+(gg / 10000)
+#Gross Cost
+(gc <- sum(A2[,4]) * 2)
+#Net Gain
+(ng <- gg - gc)
+#Net Gain %
+(ng / 10000)
+#Avg Gain
+pst <- which(A2[,3] > 0)
+(avg_g <- sum(A2[pst , 3]) / sum(A2[pst , 4]))
+# Max Gain
+(max_g <- max(A2[pst , 5]))
+# Max Loss
+(max_l <- min(A2[, 6]))
+
+
+# Measuring Copula no Dnynamic
+
+
+df_pfas2 <- df_test2 %>% 
+  dplyr::select(Datetime,Open,High,Low,Close,TARGET,T_COP_EMA20,aux_tg_buy,aux_buy_stop,aux_tg_sell,aux_sell_stop) %>%
+  mutate(STR_RSI = ifelse(T_COP_EMA20 < 0.35 & T_COP_EMA20 <  dplyr::lag(T_COP_EMA20,1) , "Buy", 
+                          ifelse(T_COP_EMA20 > 0.65 & T_COP_EMA20 >  dplyr::lag(T_COP_EMA20,1) , "Sell","No Trading")))
+
+table(df_pfas2$STR_RSI, df_pfas2$TARGET)
+
+25 / (25 + 21 + 22)
+13 / (6 + 10 + 13)
+
+# Assuming Comission Cost of 2Pips which would be 2 euro
+
+A2 <- df_pfas2 %>% 
+  mutate(FINAL_RESULT = ifelse(STR_RSI == "Buy" & TARGET == "Buy Correct", aux_tg_buy - Close,
+                               ifelse(STR_RSI == "Buy" & TARGET != "Buy Correct", aux_buy_stop - Close,       
+                                      ifelse(STR_RSI == "Sell" & TARGET == "Sell Correct", Close - aux_tg_sell,
+                                             ifelse(STR_RSI == "Sell" & TARGET != "Sell Correct", Close - aux_sell_stop, 0
+                                             ))))) %>%
+  group_by(STR_RSI,TARGET) %>%
+  summarise(P_and_L = sum(FINAL_RESULT) / 0.0001,
+            Count_Transaction = n(),
+            MAX_P_and_L = max(FINAL_RESULT) / 0.0001,
+            MIN_P_and_L = min(FINAL_RESULT) / 0.0001) %>%
+  filter(STR_RSI != 'No Trading')
+A2  
+
+#Count Transaction
+sum(A2$Count_Transaction)
+#Gross Gain
+(gg <- sum(A2[,3]))
+#Gross Gain %
+(gg / 10000)
+#Gross Cost
+(gc <- sum(A2[,4]) * 2)
+#Net Gain
+(ng <- gg - gc)
+#Net Gain %
+(ng / 10000)
+
+#Avg Gain
+pst <- which(A2[,3] > 0)
+(avg_g <- sum(A2[pst , 3]) / sum(A2[pst , 4]))
+# Max Gain
+(max_g <- max(A2[pst , 5]))
+# Max Loss
+(max_l <- min(A2[, 6]))
