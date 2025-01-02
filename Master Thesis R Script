@@ -810,7 +810,21 @@ df_formation_T <- df_train2 %>%
 u <- pobs(df_formation_T$R_USD)
 v <- pobs(df_formation_T$R_JPY)
 
-help(pobs)
+m <- cbind(u,v)
+# Contour plot
+
+m_df <- data.frame(m)
+colnames(m_df) <- c('u1','u2')
+
+empirical_plot <- ggplot(data = m_df, aes(x = u1, y = u2)) +
+  geom_point(alpha = 0.2) +
+  geom_density_2d_filled(contour_var = "ndensity", alpha = 0.8, 
+                         aes(fill = ..level..)) +
+  labs(title = "Empirical Data with Copula Contour Overlay", x = "U1", y = "U2") +
+  theme_minimal()
+
+plot(empirical_plot)
+
 
 BiCopCompare(u,v,familyset=NA) # Comparing the BIC for each Family
 
