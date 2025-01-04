@@ -1882,3 +1882,181 @@ pst <- which(A2[,3] > 0)
 (max_g <- max(A2[pst , 5]))
 # Max Loss
 (max_l <- min(A2[, 6]))
+
+#######Diverse Attempts#################
+
+
+# XGBOOST
+nnn <- colnames(df_triplot_train)[-1]
+nnn2 <- colnames(df_train2)
+nnn3 <- colnames(df_test2)
+
+cols_train <- which(nnn2 %in% nnn)
+cols_test <- which(nnn3 %in% nnn)
+
+#
+xgb_train <- xgb.DMatrix(data = as.matrix(df_train2[,cols_train]), label = as.integer(df_train2$TARGET) - 1)
+xgb_test <- xgb.DMatrix(data = as.matrix(df_test2[,cols_test]), label = as.integer(df_test2$TARGET) - 1)
+
+# Setting the parameters
+xgb_params <- list(
+  booster = "gbtree",
+  eta = 0.08,
+  max_depth = 8,
+  gamma = 4,
+  subsample = 0.75,
+  colsample_bytree = 1,
+  objective = "multi:softprob",
+  eval_metric = "mlogloss",
+  num_class = 3
+)
+
+
+xgb_model <- xgb.train(
+  params = xgb_params,
+  data = xgb_train,
+  nrounds = 3000,
+  verbose = 1
+)
+
+xgb_model
+
+xgb_imp_matrix <- xgb.importance(model = xgb_model ,
+                                 feature_names = colnames(xgb_model$feature_names))
+
+xgb.plot.importance(xgb_imp_matrix)
+
+xgb_pred <- predict(xgb_model,xgb_test,reshape = TRUE)
+colnames(xgb_pred) <- c("Buy","No Trading","Sell")
+
+xgb_pred_df <- as.data.frame(xgb_pred)
+xgb_pred_df$TARGET <- df_test2$TARGET 
+
+xgb_pred_df$PREDICTION_RANGE_BUY <- cut(xgb_pred_df$Buy,breaks = seq(0,1,by =0.05))
+xgb_pred_df$PREDICTION_RANGE_SELL <- cut(xgb_pred_df$Sell,breaks = seq(0,1,by =0.05))
+
+
+table(PREDICTION_RANGE = xgb_pred_df$PREDICTION_RANGE_BUY, TARGET = xgb_pred_df$TARGET )
+
+T_xgb<- table(PREDICTION_RANGE = (xgb_pred_df$Buy > 0.8), TARGET = xgb_pred_df$TARGET )
+T_xgb
+T_xgb[2,1] / sum(T_xgb[2,])
+
+table(PREDICTION_RANGE = xgb_pred_df$PREDICTION_RANGE_SELL, TARGET = xgb_pred_df$TARGET )
+
+T_xgb<- table(PREDICTION_RANGE = (xgb_pred_df$Sell > 0.6), TARGET = xgb_pred_df$TARGET )
+T_xgb
+T_xgb[2,1] / sum(T_xgb[2,])
+
+
+## Garch on Residuals and Copula
+
+
+# ARMA(1,1)-eGARCH(1,1)
+
+#Specifying the Garch
+spec <- ugarchspec(mean.model = list(armaOrder = c(1, 1)),
+                   variance.model = list(model = "eGARCH", garchOrder = c(1, 1)),
+                   distribution.model = "std")
+
+# Getting the retunrs
+df_usd <- df_train2 %>% dplyr::pull(R_USD)
+
+df_jpy <- df_train2 %>% dplyr::pull(R_JPY)
+
+#Fitting the models
+
+Garch_USD <- ugarchfit(spec = spec, data = df_usd)
+
+Garch_JPY <- ugarchfit(spec = spec, data = df_jpy)
+
+show(Garch_USD)
+summary(Garch_USD)
+
+summary(Garch_USD@model)
+
+# Getting residulas
+
+res_USD <- scale(Garch_USD@fit$residuals)
+
+res_JPY <- scale(Garch_JPY@fit$residuals)
+
+# Perform the Breusch-Pagan test
+nres <- length(res_USD)
+
+bptest(res_USD ~ seq(1,nres,1))
+
+bptest(Garch_JPY)
+
+bptest(res_JPY ~ seq(1,nres,1))
+
+A <- sample(seq(1,nres,1),size = 6000)
+
+bptest(res_USD[A] ~ A)
+
+bptest(res_JPY[A] ~ A)
+
+plot(res_USD)
+
+# Transforming residuos
+
+u1 <- pobs(res_USD)
+u2 <- pobs(res_JPY)
+
+BiCopCompare(u1,u2)
+
+### Risk Reward MUltiplier
+
+#Setting the parameters (Potential discussion)
+
+good_R <- 4
+bad_R <- good_R / 2
+
+df_j_aux <- df_train2
+
+df_j_aux <- df_j_aux %>%
+  mutate(aux_tg_buy = Close + good_R*SD20,
+         aux_buy_stop = Close - bad_R*SD20,
+         
+         aux_tg_sell = Close - good_R*SD20,
+         aux_sell_stop = Close + bad_R*SD20
+  )
+
+#Simulation
+set.seed(1995)
+a <- sample(x = seq(1,17000,1),size = 10000)
+aux_sim<-c()
+step_forward <- 200
+
+for( i in 1:length(a))
+{
+  
+  #i=3
+  sim_close <- df_j_aux$Close[a[i]] 
+  sim_SD20 <- df_j_aux$SD20[a[i]]
+  sim_tg_buy <- sim_close + good_R*sim_SD20
+  sim_tg_sell <- sim_close - good_R*sim_SD20 
+  sim_stop_buy <- sim_close - bad_R*sim_SD20
+  sim_stop_sell <- sim_close + bad_R*sim_SD20 
+  
+  vec_aux_max <- df_j_aux$High[a[i]:(a[i]+ step_forward)]
+  vec_aux_min <- df_j_aux$Low[a[i]:(a[i]+ step_forward)]
+  
+  sim_min_speed_buy<- min(which(sim_tg_buy <= vec_aux_max))
+  
+  sim_min_speed_sell<- min(which(sim_tg_sell >= vec_aux_min))
+  
+  aux_sim[i] <- min(sim_min_speed_buy, sim_min_speed_sell) 
+  
+}
+
+#Calculating the % of points with no response
+
+length(which(aux_sim == Inf)) / length(a)
+
+qqauxsim <-quantile(aux_sim, seq(0.1,0.9,0.1))
+qqauxsim
+qqauxsim[1] * 5
+qqauxsim[5] * 5 / 60
+qqauxsim[7] * 5 / 60
+
